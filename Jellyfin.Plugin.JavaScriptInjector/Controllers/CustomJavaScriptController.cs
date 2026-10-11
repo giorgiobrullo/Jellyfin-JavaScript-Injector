@@ -1,8 +1,7 @@
 using System.Reflection;
 using System.Text;
-using System.Text.Json;
 using Jellyfin.Plugin.JavaScriptInjector.Configuration;
-using Jellyfin.Plugin.JavaScriptInjector.Services;
+using Jellyfin.Plugin.JavaScriptInjector.Helpers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -122,52 +121,6 @@ namespace Jellyfin.Plugin.JavaScriptInjector.Controllers
         }
 
         /// <summary>
-        /// Emits loader code for entries that need their own script element (a src, or
-        /// inline modules, since import is not valid inside the classic-script wrapper).
-        /// </summary>
-        /// <returns>True if the entry was handled here.</returns>
-        private static bool AppendExternalScript(StringBuilder builder, CustomJavaScriptEntry entry, bool allowExternal)
-        {
-            var hasSrc = !string.IsNullOrWhiteSpace(entry.Src);
-            if (!hasSrc && !entry.Module)
-            {
-                return false;
-            }
-
-            if (hasSrc && !JavaScriptRegistrationService.IsValidSrc(entry.Src))
-            {
-                builder.AppendLine($"console.error('JavaScript Injector: skipped script with invalid src', {JsonSerializer.Serialize(entry.Name)});");
-                return true;
-            }
-
-            if (hasSrc && !allowExternal && JavaScriptRegistrationService.IsExternalSrc(entry.Src))
-            {
-                builder.AppendLine($"console.warn('JavaScript Injector: skipped external script URL (enable \"Allow external script URLs\" in the plugin settings to load it)', {JsonSerializer.Serialize(entry.Name)});");
-                return true;
-            }
-
-            if (!hasSrc && string.IsNullOrWhiteSpace(entry.Script))
-            {
-                return true;
-            }
-
-            builder.AppendLine($"/* {(hasSrc ? "External" : "Module")} Script: {entry.Name.Replace("*/", "* /")} */");
-            builder.AppendLine("(function() { try {");
-            builder.AppendLine("var s = document.createElement('script');");
-            if (entry.Module)
-            {
-                builder.AppendLine("s.type = 'module';");
-            }
-
-            builder.AppendLine(hasSrc
-                ? $"s.src = {JsonSerializer.Serialize(entry.Src.Trim())};"
-                : $"s.textContent = {JsonSerializer.Serialize(entry.Script)};");
-            builder.AppendLine("document.head.appendChild(s);");
-            builder.AppendLine("} catch (e) { console.error('Error loading script:', e); } })();");
-            return true;
-        }
-
-        /// <summary>
         /// Helper method to generate the JavaScript content based on the authentication requirement.
         /// </summary>
         /// <param name="config">The plugin configuration.</param>
@@ -180,49 +133,16 @@ namespace Jellyfin.Plugin.JavaScriptInjector.Controllers
                 return Content("/* Plugin configuration not loaded. */", "application/javascript");
             }
 
-            var scriptBuilder = new StringBuilder();
+            var script = ScriptBundle.Build(config, requiresAuth);
 
-            // Filter user scripts based on whether they are enabled and match the authentication requirement
-            var userScriptsToInject = config.CustomJavaScripts
-                .Where(s => s.Enabled && s.RequiresAuthentication == requiresAuth);
+            // Asked for by the URL index.html gives (the content's version): kept by the browser.
+            // Otherwise, as before, asked again each time.
+            var version = Request.Query["v"].ToString();
+            Response.Headers["Cache-Control"] = version == ScriptBundle.Version(script)
+                ? (requiresAuth ? "private" : "public") + ", max-age=31536000, immutable"
+                : "no-cache";
 
-            foreach (var scriptEntry in userScriptsToInject)
-            {
-                if (AppendExternalScript(scriptBuilder, scriptEntry, config.AllowExternalScriptUrls))
-                {
-                    continue;
-                }
-
-                if (!string.IsNullOrWhiteSpace(scriptEntry.Script))
-                {
-                    scriptBuilder.AppendLine($"/* User Script: {scriptEntry.Name} */");
-                    scriptBuilder.AppendLine("(function() { try {");
-                    scriptBuilder.AppendLine(scriptEntry.Script);
-                    scriptBuilder.AppendLine("} catch (e) { console.error('Error in Injected JavaScript [\"" + scriptEntry.Name + "\"]:', e); } })();");
-                }
-            }
-
-            // Filter plugin scripts based on whether they are enabled and match the authentication requirement
-            var pluginScriptsToInject = config.PluginJavaScripts
-                .Where(s => s.Enabled && s.RequiresAuthentication == requiresAuth);
-
-            foreach (var scriptEntry in pluginScriptsToInject)
-            {
-                if (AppendExternalScript(scriptBuilder, scriptEntry, config.AllowExternalScriptUrls))
-                {
-                    continue;
-                }
-
-                if (!string.IsNullOrWhiteSpace(scriptEntry.Script))
-                {
-                    scriptBuilder.AppendLine($"/* Plugin Script: {scriptEntry.Name} (from {scriptEntry.PluginName}) */");
-                    scriptBuilder.AppendLine("(function() { try {");
-                    scriptBuilder.AppendLine(scriptEntry.Script);
-                    scriptBuilder.AppendLine("} catch (e) { console.error('Error in Plugin JavaScript [\"" + scriptEntry.Name + "\" from \"" + scriptEntry.PluginName + "\"]:', e); } })();");
-                }
-            }
-
-            return Content(scriptBuilder.ToString(), "application/javascript");
+            return Content(script, "application/javascript");
         }
     }
 }
