@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text;
 using Jellyfin.Plugin.JavaScriptInjector.Configuration;
+using Jellyfin.Plugin.JavaScriptInjector.Helpers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -109,39 +110,16 @@ namespace Jellyfin.Plugin.JavaScriptInjector.Controllers
                 return Content("/* Plugin configuration not loaded. */", "application/javascript");
             }
 
-            var scriptBuilder = new StringBuilder();
+            var script = ScriptBundle.Build(config, requiresAuth);
 
-            // Filter user scripts based on whether they are enabled and match the authentication requirement
-            var userScriptsToInject = config.CustomJavaScripts
-                .Where(s => s.Enabled && s.RequiresAuthentication == requiresAuth);
+            // Asked for by the URL index.html gives (the content's version): kept by the browser.
+            // Otherwise, as before, asked again each time.
+            var version = Request.Query["v"].ToString();
+            Response.Headers["Cache-Control"] = version == ScriptBundle.Version(script)
+                ? (requiresAuth ? "private" : "public") + ", max-age=31536000, immutable"
+                : "no-cache";
 
-            foreach (var scriptEntry in userScriptsToInject)
-            {
-                if (!string.IsNullOrWhiteSpace(scriptEntry.Script))
-                {
-                    scriptBuilder.AppendLine($"/* User Script: {scriptEntry.Name} */");
-                    scriptBuilder.AppendLine("(function() { try {");
-                    scriptBuilder.AppendLine(scriptEntry.Script);
-                    scriptBuilder.AppendLine("} catch (e) { console.error('Error in Injected JavaScript [\"" + scriptEntry.Name + "\"]:', e); } })();");
-                }
-            }
-
-            // Filter plugin scripts based on whether they are enabled and match the authentication requirement
-            var pluginScriptsToInject = config.PluginJavaScripts
-                .Where(s => s.Enabled && s.RequiresAuthentication == requiresAuth);
-
-            foreach (var scriptEntry in pluginScriptsToInject)
-            {
-                if (!string.IsNullOrWhiteSpace(scriptEntry.Script))
-                {
-                    scriptBuilder.AppendLine($"/* Plugin Script: {scriptEntry.Name} (from {scriptEntry.PluginName}) */");
-                    scriptBuilder.AppendLine("(function() { try {");
-                    scriptBuilder.AppendLine(scriptEntry.Script);
-                    scriptBuilder.AppendLine("} catch (e) { console.error('Error in Plugin JavaScript [\"" + scriptEntry.Name + "\" from \"" + scriptEntry.PluginName + "\"]:', e); } })();");
-                }
-            }
-
-            return Content(scriptBuilder.ToString(), "application/javascript");
+            return Content(script, "application/javascript");
         }
     }
 }

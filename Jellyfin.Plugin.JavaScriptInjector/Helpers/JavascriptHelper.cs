@@ -9,11 +9,19 @@ namespace Jellyfin.Plugin.JavaScriptInjector.Helpers
             var startComment = "<!-- BEGIN JavaScript Injector Plugin -->";
             var endComment = "<!-- END JavaScript Injector Plugin -->";
 
-            // Use timestamp for cache-busting - invalidates on every page load
-            var timestamp = DateTime.UtcNow.Ticks;
+            // Each script's URL carries a hash of its content (ScriptBundle.Version): it changes when
+            // the script does, which busts every cache in between (Cloudflare's, #8), and stays the
+            // same otherwise, so browsers keep the script and index.html can answer 304. It was the
+            // time, which made every page load fetch both scripts and a new index.html.
+            var config = Plugin.Instance?.Configuration;
+            var publicScript = config == null ? null : ScriptBundle.Build(config, false);
+            var privateScript = config == null ? null : ScriptBundle.Build(config, true);
+            var fallback = DateTime.UtcNow.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var publicVersion = publicScript == null ? fallback : ScriptBundle.Version(publicScript);
+            var timestamp = privateScript == null ? fallback : ScriptBundle.Version(privateScript);
 
             // Public scripts are loaded immediately for all users (including on the login page).
-            var publicScriptTag = $"<script defer src=\"../JavaScriptInjector/public.js?v={timestamp}\"></script>";
+            var publicScriptTag = $"<script defer src=\"../JavaScriptInjector/public.js?v={publicVersion}\"></script>";
             // This inline script waits for the user to be authenticated and then fetches the private scripts.
             // It uses the official ApiClient.fetch method, which automatically includes authentication headers.
             var privateScriptLoader = @"
@@ -42,8 +50,9 @@ namespace Jellyfin.Plugin.JavaScriptInjector.Helpers
                         });
                     }
                 };
-                // Set an interval to check for authentication status every 300 milliseconds.
-                const authInterval = setInterval(fetchPrivateScripts, 300);
+                // Check for authentication status every 50 milliseconds (a cheap check: the
+                // private scripts no longer wait up to 300 ms after sign-in).
+                const authInterval = setInterval(fetchPrivateScripts, 50);
             })();
         </script>";
             // The full block to be injected, wrapped in comments.
